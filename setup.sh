@@ -122,5 +122,8 @@ pip list | grep -q transformers || pip install transformers
 pip list | grep -q iopaint || pip install iopaint
 pip list | grep -q opencv-python-headless || pip install opencv-python-headless
 
+iopaint download --model lama
+
 # Run remwm.py with passed arguments
 python remwm.py "${SCRIPT_ARGS[@]}"
+
