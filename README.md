@@ -4,8 +4,13 @@ Please run colab script
 
 ### Removed watermark
 
-https://github.com/user-attachments/assets/a69615f1-392e-4925-a859-23b0e8646797
+
+[out.webm](https://github.com/user-attachments/assets/d902d040-f54c-4958-8d27-8b3c3bcbb6dd)
+
+
+
 
 ### Source
 
 https://github.com/user-attachments/assets/8deffd66-b961-4ec2-9dc0-97695b0f91c5
+
