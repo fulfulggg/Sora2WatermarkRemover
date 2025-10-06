@@ -14,6 +14,7 @@ dependencies:
   - opencv
   - pip:
       - --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu126
-      - iopaint==1.6.0
+      - iopaint
+
 
 
