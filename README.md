@@ -14,3 +14,9 @@ Please run colab script
 
 https://github.com/user-attachments/assets/8deffd66-b961-4ec2-9dc0-97695b0f91c5
 
+
+# Sora2WatermarkRemover 101
+
+https://www.youtube.com/watch?v=HkXD4zwk6WY
+
+[![](https://img.youtube.com/vi/HkXD4zwk6WY/0.jpg)](https://www.youtube.com/watch?v=HkXD4zwk6WY)
