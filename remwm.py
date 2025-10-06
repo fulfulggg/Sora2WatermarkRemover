@@ -48,7 +48,7 @@ def identify(task_prompt: TaskType, image: MatLike, text_input: str, model: Auto
     )
 
 def get_watermark_mask(image: MatLike, model: AutoModelForCausalLM, processor: AutoProcessor, device: str, max_bbox_percent: float):
-    text_input = "watermark"
+    text_input = "watermark Sora logo"
     task_prompt = TaskType.OPEN_VOCAB_DETECTION
     parsed_answer = identify(task_prompt, image, text_input, model, processor, device)
 
