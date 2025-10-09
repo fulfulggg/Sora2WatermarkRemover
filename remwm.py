@@ -9,6 +9,7 @@ except Exception:
 
 import click
 from pathlib import Path
+from collections import deque
 import cv2
 import numpy as np
 from PIL import Image, ImageDraw
@@ -109,7 +110,7 @@ def is_video_file(file_path):
     video_extensions = ['.mp4', '.avi', '.mov', '.mkv', '.flv', '.wmv', '.webm']
     return Path(file_path).suffix.lower() in video_extensions
 
-def process_video(input_path, output_path, florence_model, florence_processor, model_manager, device, transparent, max_bbox_percent, force_format, frame_step=1, target_fps=0.0):
+def process_video(input_path, output_path, florence_model, florence_processor, model_manager, device, transparent, max_bbox_percent, force_format, frame_step=1, target_fps=0.0, temporal_mask=3, mask_dilate=4):
     """Process a video file by extracting frames, removing watermarks, and reconstructing the video"""
     cap = cv2.VideoCapture(str(input_path))
     if not cap.isOpened():
@@ -150,6 +151,11 @@ def process_video(input_path, output_path, florence_model, florence_processor, m
     
     out = cv2.VideoWriter(str(temp_video_path), fourcc, fps_out, (width, height))
     
+    # Initialize temporal mask buffer and dilation kernel
+    temporal_masks = deque(maxlen=max(1, temporal_mask))
+    k = max(1, int(mask_dilate))
+    kernel = np.ones((k, k), np.uint8) if k > 1 else None
+
     # Process each frame
     with tqdm.tqdm(total=total_frames, desc="Processing video frames") as pbar:
         frame_count = 0
@@ -171,8 +177,18 @@ def process_video(input_path, output_path, florence_model, florence_processor, m
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             pil_image = Image.fromarray(frame_rgb)
             
-            # Get watermark mask
+            # Get watermark mask (PIL L)
             mask_image = get_watermark_mask(pil_image, florence_model, florence_processor, device, max_bbox_percent)
+
+            # Binarize -> temporal fuse -> dilate
+            mask_np = np.array(mask_image, dtype=np.uint8)
+            mask_bin = (mask_np > 0).astype(np.uint8) * 255
+            temporal_masks.append(mask_bin)
+            fused_mask = temporal_masks[0].copy()
+            for _m in list(temporal_masks)[1:]:
+                fused_mask = cv2.bitwise_or(fused_mask, _m)
+            if kernel is not None:
+                fused_mask = cv2.dilate(fused_mask, kernel, iterations=1)
             
             # Process frame
             if transparent:
@@ -183,7 +199,7 @@ def process_video(input_path, output_path, florence_model, florence_processor, m
                 background.paste(result_image, mask=result_image.split()[3])
                 result_image = background
             else:
-                lama_result = process_image_with_lama(np.array(pil_image), np.array(mask_image), model_manager)
+                lama_result = process_image_with_lama(np.array(pil_image), fused_mask, model_manager)
                 result_image = Image.fromarray(cv2.cvtColor(lama_result, cv2.COLOR_BGR2RGB))
             
             # Convert back to OpenCV format and write to output video
@@ -243,14 +259,14 @@ def process_video(input_path, output_path, florence_model, florence_processor, m
     logger.info(f"input_path:{input_path}, output_path:{output_file}, overall_progress:100")
     return output_file
 
-def handle_one(image_path: Path, output_path: Path, florence_model, florence_processor, model_manager, device, transparent, max_bbox_percent, force_format, overwrite, frame_step=1, target_fps=0.0):
+def handle_one(image_path: Path, output_path: Path, florence_model, florence_processor, model_manager, device, transparent, max_bbox_percent, force_format, overwrite, frame_step=1, target_fps=0.0, temporal_mask=3, mask_dilate=4):
     if output_path.exists() and not overwrite:
         logger.info(f"Skipping existing file: {output_path}")
         return
 
     # Check if it's a video file
     if is_video_file(image_path):
-        return process_video(image_path, output_path, florence_model, florence_processor, model_manager, device, transparent, max_bbox_percent, force_format, frame_step, target_fps)
+        return process_video(image_path, output_path, florence_model, florence_processor, model_manager, device, transparent, max_bbox_percent, force_format, frame_step, target_fps, temporal_mask, mask_dilate)
 
     # Process image
     image = Image.open(image_path).convert("RGB")
@@ -294,7 +310,9 @@ def handle_one(image_path: Path, output_path: Path, florence_model, florence_pro
 @click.option("--force-format", type=click.Choice(["PNG", "WEBP", "JPG", "MP4", "AVI"], case_sensitive=False), default=None, help="Force output format. Defaults to input format.")
 @click.option("--frame-step", default=1, type=int, help="Process every Nth frame (1=all frames, 2=every other frame)")
 @click.option("--target-fps", default=0.0, type=float, help="Target output FPS (0=same as input)")
-def main(input_path: str, output_path: str, overwrite: bool, transparent: bool, max_bbox_percent: float, force_format: str, frame_step: int, target_fps: float):
+@click.option("--temporal-mask", "opt_temporal_mask", default=3, type=int, help="Temporal mask window size (frames).")
+@click.option("--mask-dilate", "opt_mask_dilate", default=4, type=int, help="Mask dilation size (px).")
+def main(input_path: str, output_path: str, overwrite: bool, transparent: bool, max_bbox_percent: float, force_format: str, frame_step: int, target_fps: float, opt_temporal_mask: int, opt_mask_dilate: int):
     # Input validation
     if frame_step < 1:
         logger.error("frame_step must be >= 1")
@@ -330,7 +348,7 @@ def main(input_path: str, output_path: str, overwrite: bool, transparent: bool, 
 
         for idx, file_path in enumerate(tqdm.tqdm(files, desc="Processing files")):
             output_file = output_path / file_path.name
-            handle_one(file_path, output_file, florence_model, florence_processor, model_manager, device, transparent, max_bbox_percent, force_format, overwrite, frame_step, target_fps)
+            handle_one(file_path, output_file, florence_model, florence_processor, model_manager, device, transparent, max_bbox_percent, force_format, overwrite, frame_step, target_fps, opt_temporal_mask, opt_mask_dilate)
             progress = int((idx + 1) / total_files * 100)
             print(f"input_path:{file_path}, output_path:{output_file}, overall_progress:{progress}")
     else:
@@ -342,7 +360,7 @@ def main(input_path: str, output_path: str, overwrite: bool, transparent: bool, 
             else:
                 output_file = output_path.with_suffix(".mp4")  # Default to mp4
         
-        handle_one(input_path, output_file, florence_model, florence_processor, model_manager, device, transparent, max_bbox_percent, force_format, overwrite, frame_step, target_fps)
+        handle_one(input_path, output_file, florence_model, florence_processor, model_manager, device, transparent, max_bbox_percent, force_format, overwrite, frame_step, target_fps, opt_temporal_mask, opt_mask_dilate)
         print(f"input_path:{input_path}, output_path:{output_file}, overall_progress:100")
 
 if __name__ == "__main__":
