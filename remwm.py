@@ -101,7 +101,7 @@ def is_video_file(file_path):
     video_extensions = ['.mp4', '.avi', '.mov', '.mkv', '.flv', '.wmv', '.webm']
     return Path(file_path).suffix.lower() in video_extensions
 
-def process_video(input_path, output_path, florence_model, florence_processor, model_manager, device, transparent, max_bbox_percent, force_format):
+def process_video(input_path, output_path, florence_model, florence_processor, model_manager, device, transparent, max_bbox_percent, force_format, frame_step=1, target_fps=0.0):
     """Process a video file by extracting frames, removing watermarks, and reconstructing the video"""
     cap = cv2.VideoCapture(str(input_path))
     if not cap.isOpened():
@@ -110,6 +110,7 @@ def process_video(input_path, output_path, florence_model, florence_processor, m
 
     # Get video properties
     fps = cap.get(cv2.CAP_PROP_FPS)
+    fps_out = target_fps if target_fps > 0 else fps
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -139,15 +140,24 @@ def process_video(input_path, output_path, florence_model, florence_processor, m
     else:
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # Default to MP4
     
-    out = cv2.VideoWriter(str(temp_video_path), fourcc, fps, (width, height))
+    out = cv2.VideoWriter(str(temp_video_path), fourcc, fps_out, (width, height))
     
     # Process each frame
     with tqdm.tqdm(total=total_frames, desc="Processing video frames") as pbar:
         frame_count = 0
+        frame_idx = 0
         while cap.isOpened():
             ret, frame = cap.read()
             if not ret:
                 break
+            
+            # Frame skip control
+            if frame_idx % frame_step != 0:
+                frame_idx += 1
+                pbar.update(1)
+                progress = int((frame_idx / total_frames) * 100)
+                print(f"Processing frame {frame_idx}/{total_frames}, progress:{progress}%")
+                continue
             
             # Convert frame to PIL Image
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -174,9 +184,10 @@ def process_video(input_path, output_path, florence_model, florence_processor, m
             
             # Update progress
             frame_count += 1
+            frame_idx += 1
             pbar.update(1)
-            progress = int((frame_count / total_frames) * 100)
-            print(f"Processing frame {frame_count}/{total_frames}, progress:{progress}%")
+            progress = int((frame_idx / total_frames) * 100)
+            print(f"Processing frame {frame_idx}/{total_frames}, progress:{progress}%")
     
     # Release resources
     cap.release()
@@ -224,14 +235,14 @@ def process_video(input_path, output_path, florence_model, florence_processor, m
     logger.info(f"input_path:{input_path}, output_path:{output_file}, overall_progress:100")
     return output_file
 
-def handle_one(image_path: Path, output_path: Path, florence_model, florence_processor, model_manager, device, transparent, max_bbox_percent, force_format, overwrite):
+def handle_one(image_path: Path, output_path: Path, florence_model, florence_processor, model_manager, device, transparent, max_bbox_percent, force_format, overwrite, frame_step=1, target_fps=0.0):
     if output_path.exists() and not overwrite:
         logger.info(f"Skipping existing file: {output_path}")
         return
 
     # Check if it's a video file
     if is_video_file(image_path):
-        return process_video(image_path, output_path, florence_model, florence_processor, model_manager, device, transparent, max_bbox_percent, force_format)
+        return process_video(image_path, output_path, florence_model, florence_processor, model_manager, device, transparent, max_bbox_percent, force_format, frame_step, target_fps)
 
     # Process image
     image = Image.open(image_path).convert("RGB")
@@ -273,7 +284,17 @@ def handle_one(image_path: Path, output_path: Path, florence_model, florence_pro
 @click.option("--transparent", is_flag=True, help="Make watermark regions transparent instead of removing.")
 @click.option("--max-bbox-percent", default=10.0, help="Maximum percentage of the image that a bounding box can cover.")
 @click.option("--force-format", type=click.Choice(["PNG", "WEBP", "JPG", "MP4", "AVI"], case_sensitive=False), default=None, help="Force output format. Defaults to input format.")
-def main(input_path: str, output_path: str, overwrite: bool, transparent: bool, max_bbox_percent: float, force_format: str):
+@click.option("--frame-step", default=1, type=int, help="Process every Nth frame (1=all frames, 2=every other frame)")
+@click.option("--target-fps", default=0.0, type=float, help="Target output FPS (0=same as input)")
+def main(input_path: str, output_path: str, overwrite: bool, transparent: bool, max_bbox_percent: float, force_format: str, frame_step: int, target_fps: float):
+    # Input validation
+    if frame_step < 1:
+        logger.error("frame_step must be >= 1")
+        sys.exit(1)
+    if target_fps < 0:
+        logger.error("target_fps must be >= 0")
+        sys.exit(1)
+    
     input_path = Path(input_path)
     output_path = Path(output_path)
 
@@ -301,7 +322,7 @@ def main(input_path: str, output_path: str, overwrite: bool, transparent: bool, 
 
         for idx, file_path in enumerate(tqdm.tqdm(files, desc="Processing files")):
             output_file = output_path / file_path.name
-            handle_one(file_path, output_file, florence_model, florence_processor, model_manager, device, transparent, max_bbox_percent, force_format, overwrite)
+            handle_one(file_path, output_file, florence_model, florence_processor, model_manager, device, transparent, max_bbox_percent, force_format, overwrite, frame_step, target_fps)
             progress = int((idx + 1) / total_files * 100)
             print(f"input_path:{file_path}, output_path:{output_file}, overall_progress:{progress}")
     else:
@@ -313,7 +334,7 @@ def main(input_path: str, output_path: str, overwrite: bool, transparent: bool, 
             else:
                 output_file = output_path.with_suffix(".mp4")  # Default to mp4
         
-        handle_one(input_path, output_file, florence_model, florence_processor, model_manager, device, transparent, max_bbox_percent, force_format, overwrite)
+        handle_one(input_path, output_file, florence_model, florence_processor, model_manager, device, transparent, max_bbox_percent, force_format, overwrite, frame_step, target_fps)
         print(f"input_path:{input_path}, output_path:{output_file}, overall_progress:100")
 
 if __name__ == "__main__":
