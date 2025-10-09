@@ -1,4 +1,12 @@
 import sys
+# HF Hub compat: cached_download shim
+try:
+    import huggingface_hub as hfh
+    if not hasattr(hfh, "cached_download"):
+        hfh.cached_download = hfh.hf_hub_download
+except Exception:
+    pass
+
 import click
 from pathlib import Path
 import cv2
