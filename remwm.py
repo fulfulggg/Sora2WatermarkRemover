@@ -67,13 +67,32 @@ def get_watermark_mask(image: MatLike, model: AutoModelForCausalLM, processor: A
     detection_key = "<OPEN_VOCABULARY_DETECTION>"
     if detection_key in parsed_answer and "bboxes" in parsed_answer[detection_key]:
         image_area = image.width * image.height
+        # 画像をnumpy配列に変換（色チェック用）
+        image_np = np.array(image)
+        
         for bbox in parsed_answer[detection_key]["bboxes"]:
             x1, y1, x2, y2 = map(int, bbox)
             bbox_area = (x2 - x1) * (y2 - y1)
-            if (bbox_area / image_area) * 100 <= max_bbox_percent:
-                draw.rectangle([x1, y1, x2, y2], fill=255)
-            else:
+            
+            # サイズチェック
+            if (bbox_area / image_area) * 100 > max_bbox_percent:
                 logger.warning(f"Skipping large bounding box: {bbox} covering {bbox_area / image_area:.2%} of the image")
+                continue
+            
+            # 色フィルタ：白っぽい領域のみを採用
+            roi = image_np[y1:y2, x1:x2]
+            hsv_roi = cv2.cvtColor(roi, cv2.COLOR_RGB2HSV)
+            
+            # 平均彩度(S)と平均明度(V)を計算
+            avg_saturation = np.mean(hsv_roi[:, :, 1])  # S値（0-255）
+            avg_value = np.mean(hsv_roi[:, :, 2])       # V値（0-255）
+            
+            # 白っぽい判定：彩度が低く（<80）、明度が高い（>180）
+            if avg_saturation < 80 and avg_value > 180:
+                draw.rectangle([x1, y1, x2, y2], fill=255)
+                logger.info(f"White watermark detected: S={avg_saturation:.1f}, V={avg_value:.1f}")
+            else:
+                logger.info(f"Skipping colored logo: S={avg_saturation:.1f}, V={avg_value:.1f}")
 
     return mask
 
