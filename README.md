@@ -2,6 +2,8 @@ Please run colab script
 
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/fulfulggg/Sora2WatermarkRemover/blob/main/Sora2WatermarkRemover_Colab.ipynb)
 
+[![Open In Colab — Branch Preview](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/fulfulggg/Sora2WatermarkRemover/blob/feat/colab-notebook/Sora2WatermarkRemover_Colab.ipynb)
+
 ### Removed watermark
 
 
