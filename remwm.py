@@ -394,8 +394,17 @@ def main(input_path: str, output_path: str, overwrite: bool, transparent: bool, 
     logger.info("Florence-2 Model loaded")
 
     if not transparent:
-        model_manager = ModelManager(name="lama", device=device)
-        logger.info("LaMa model loaded")
+        try:
+            model_manager = ModelManager(name="lama", device=device)
+            logger.info("LaMa model loaded")
+        except NotImplementedError as e:
+            logger.warning(
+                f"LaMa backend is not available in this environment: {e}. "
+                "Falling back to OpenCV inpaint backend (cv2). "
+                "To enable LaMa, reinstall iopaint with LaMa support and restart the runtime."
+            )
+            model_manager = ModelManager(name="cv2", device=device)
+            logger.info("cv2 inpaint backend loaded")
     else:
         model_manager = None
 
