@@ -69,12 +69,14 @@ def get_watermark_mask(image: MatLike, model: AutoModelForCausalLM, processor: A
     kept_bboxes = []
     skipped_size = 0
     skipped_color = 0
+    used_prompt = None
     for ptxt in prompts:
         parsed_answer = identify(task_prompt, image, ptxt, model, processor, device)
         detection_key = "<OPEN_VOCABULARY_DETECTION>"
         if detection_key in parsed_answer and "bboxes" in parsed_answer[detection_key]:
             raw_bboxes = parsed_answer[detection_key]["bboxes"] or []
             if raw_bboxes:
+                used_prompt = ptxt
                 break
 
     mask = Image.new("L", image.size, 0)
@@ -129,7 +131,7 @@ def get_watermark_mask(image: MatLike, model: AutoModelForCausalLM, processor: A
                 except Exception:
                     pass
 
-    logger.info(f"Detection summary: raw={len(raw_bboxes)} kept={len(kept_bboxes)} skipped_size={skipped_size} skipped_color={skipped_color}")
+    logger.info(f"Detection summary: raw={len(raw_bboxes)} kept={len(kept_bboxes)} skipped_size={skipped_size} skipped_color={skipped_color} prompt_used={used_prompt} prompts_tried={prompts}")
     # Debug visualization (save roughly every 30 frames to limit IO)
     try:
         if debug_viz_dir is not None and (debug_frame_idx is None or int(debug_frame_idx) % 30 == 0):
@@ -391,7 +393,7 @@ def handle_one(image_path: Path, output_path: Path, florence_model, florence_pro
 @click.option("--target-fps", default=0.0, type=float, help="Target output FPS (0=same as input)")
 @click.option("--temporal-mask", "opt_temporal_mask", default=3, type=int, help="Temporal mask window size (frames).")
 @click.option("--mask-dilate", "opt_mask_dilate", default=4, type=int, help="Mask dilation size (px).")
-@click.option("--no-white-filter", is_flag=True, help="Disable white logo color filter (S<V and V>threshold).")
+@click.option("--no-white-filter", is_flag=True, help="Disable white color filter for logo regions (ignore S/V thresholds).")
 @click.option("--white-s-thresh", default=80, type=int, help="White-filter saturation threshold S_max (default: 80).")
 @click.option("--white-v-thresh", default=180, type=int, help="White-filter brightness/value threshold V_min (default: 180).")
 @click.option("--detect-text", default=None, type=str, help='Override detection prompt for Florence-2 (default: "watermark Sora logo").')
