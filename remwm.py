@@ -423,14 +423,18 @@ def main(input_path: str, output_path: str, overwrite: bool, transparent: bool, 
         try:
             model_manager = ModelManager(name="lama", device=device)
             logger.info("LaMa model loaded")
-        except NotImplementedError as e:
+        except (NotImplementedError, ImportError, ModuleNotFoundError, RuntimeError) as e:
             logger.warning(
                 f"LaMa backend is not available in this environment: {e}. "
                 "Falling back to OpenCV inpaint backend (cv2). "
                 "To enable LaMa, reinstall iopaint with LaMa support and restart the runtime."
             )
-            model_manager = ModelManager(name="cv2", device=device)
-            logger.info("cv2 inpaint backend loaded")
+            try:
+                model_manager = ModelManager(name="cv2", device=device)
+                logger.info("cv2 inpaint backend loaded")
+            except Exception as fallback_error:
+                logger.error(f"Failed to load cv2 fallback backend: {fallback_error}")
+                sys.exit(1)
     else:
         model_manager = None
 
