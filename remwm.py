@@ -12,6 +12,7 @@ from pathlib import Path
 from collections import deque
 import cv2
 import numpy as np
+import re
 from PIL import Image, ImageDraw
 from transformers import AutoProcessor, AutoModelForCausalLM
 from iopaint.model_manager import ModelManager
@@ -56,10 +57,10 @@ def identify(task_prompt: TaskType, image: MatLike, text_input: str, model: Auto
         generated_text, task=task_prompt.value, image_size=(image.width, image.height)
     )
 
-def get_watermark_mask(image: MatLike, model: AutoModelForCausalLM, processor: AutoProcessor, device: str, max_bbox_percent: float, detect_text: str = None, no_white_filter: bool = False, debug_viz_dir: Path = None, debug_frame_idx: int = None, white_s_thresh: int = 80, white_v_thresh: int = 180, debug_viz_every: int = 30, bbox_override: str = None):
+def get_watermark_mask(image: MatLike, model: AutoModelForCausalLM, processor: AutoProcessor, device: str, max_bbox_percent: float, detect_text: str = None, no_white_filter: bool = False, debug_viz_dir: Path = None, debug_frame_idx: int = None, white_s_thresh: int = 80, white_v_thresh: int = 180, debug_viz_every: int = 30, bbox_override: str = None, bbox_override_percent: str = None, bbox_preset: str = None):
     prompts = []
     if detect_text:
-        prompts = [p.strip() for p in str(detect_text).split("|") if p.strip()]
+        prompts = [p.strip() for p in re.split(r"[|\\]+", str(detect_text)) if p.strip()]
     if not prompts:
         prompts = ["watermark Sora logo", "Sora watermark", "logo", "watermark"]
     task_prompt = TaskType.OPEN_VOCAB_DETECTION
@@ -134,6 +135,8 @@ def get_watermark_mask(image: MatLike, model: AutoModelForCausalLM, processor: A
     # Apply manual override bbox if provided (forces a rectangle mask)
     override_used = False
     override_box = None
+    
+    # Priority: bbox_override (px) > bbox_override_percent (%) > bbox_preset (corner)
     if bbox_override:
         try:
             x1, y1, x2, y2 = [int(v) for v in str(bbox_override).split(",")]
@@ -147,6 +150,49 @@ def get_watermark_mask(image: MatLike, model: AutoModelForCausalLM, processor: A
                 pass
         except Exception as e:
             logger.error(f"Invalid --bbox-override '{bbox_override}': {e}")
+    elif bbox_override_percent:
+        try:
+            W, H = image.width, image.height
+            x1p, y1p, x2p, y2p = [float(v) for v in str(bbox_override_percent).split(",")]
+            x1 = int(W * x1p / 100.0)
+            y1 = int(H * y1p / 100.0)
+            x2 = int(W * x2p / 100.0)
+            y2 = int(H * y2p / 100.0)
+            draw.rectangle([x1, y1, x2, y2], fill=255)
+            kept_bboxes.append((x1, y1, x2, y2))
+            override_used = True
+            override_box = (x1, y1, x2, y2)
+            try:
+                overlay_draw.rectangle([x1, y1, x2, y2], outline=(0, 255, 0), width=3)
+            except Exception:
+                pass
+        except Exception as e:
+            logger.error(f"Invalid --bbox-override-percent '{bbox_override_percent}': {e}")
+    elif bbox_preset:
+        try:
+            W, H = image.width, image.height
+            w = max(1, int(W * 0.20))
+            h = max(1, int(H * 0.15))
+            anchor = str(bbox_preset).lower()
+            if anchor == "tr":
+                x1, y1 = W - w, 0
+            elif anchor == "tl":
+                x1, y1 = 0, 0
+            elif anchor == "br":
+                x1, y1 = W - w, H - h
+            else:  # "bl"
+                x1, y1 = 0, H - h
+            x2, y2 = x1 + w, y1 + h
+            draw.rectangle([x1, y1, x2, y2], fill=255)
+            kept_bboxes.append((x1, y1, x2, y2))
+            override_used = True
+            override_box = (x1, y1, x2, y2)
+            try:
+                overlay_draw.rectangle([x1, y1, x2, y2], outline=(0, 255, 0), width=3)
+            except Exception:
+                pass
+        except Exception as e:
+            logger.error(f"Invalid --bbox-preset '{bbox_preset}': {e}")
 
     logger.info(f"Detection summary: raw={len(raw_bboxes)} kept={len(kept_bboxes)} skipped_size={skipped_size} skipped_color={skipped_color} prompt_used={used_prompt} prompts_tried={prompts} override_used={override_used} override_box={override_box}")
     # Debug visualization (save roughly every 30 frames to limit IO)
@@ -196,7 +242,7 @@ def is_video_file(file_path):
     video_extensions = ['.mp4', '.avi', '.mov', '.mkv', '.flv', '.wmv', '.webm']
     return Path(file_path).suffix.lower() in video_extensions
 
-def process_video(input_path, output_path, florence_model, florence_processor, model_manager, device, transparent, max_bbox_percent, force_format, frame_step=1, target_fps=0.0, temporal_mask=3, mask_dilate=4, no_white_filter=False, detect_text=None, debug_viz_dir=None, white_s_thresh=80, white_v_thresh=180, debug_viz_every=30, bbox_override=None):
+def process_video(input_path, output_path, florence_model, florence_processor, model_manager, device, transparent, max_bbox_percent, force_format, frame_step=1, target_fps=0.0, temporal_mask=3, mask_dilate=4, no_white_filter=False, detect_text=None, debug_viz_dir=None, white_s_thresh=80, white_v_thresh=180, debug_viz_every=30, bbox_override=None, bbox_override_percent=None, bbox_preset=None, debug_overlay=False):
     """Process a video file by extracting frames, removing watermarks, and reconstructing the video"""
     cap = cv2.VideoCapture(str(input_path))
     if not cap.isOpened():
@@ -277,7 +323,9 @@ def process_video(input_path, output_path, florence_model, florence_processor, m
                 white_s_thresh=white_s_thresh,
                 white_v_thresh=white_v_thresh,
                 debug_viz_every=debug_viz_every,
-                bbox_override=bbox_override
+                bbox_override=bbox_override,
+                bbox_override_percent=bbox_override_percent,
+                bbox_preset=bbox_preset
             )
 
             # Binarize -> temporal fuse -> dilate
@@ -289,6 +337,13 @@ def process_video(input_path, output_path, florence_model, florence_processor, m
                 fused_mask = cv2.bitwise_or(fused_mask, _m)
             if kernel is not None:
                 fused_mask = cv2.dilate(fused_mask, kernel, iterations=1)
+            
+            # Log mask coverage for diagnostics
+            if debug_viz_dir and frame_idx % debug_viz_every == 0:
+                nonzero = np.count_nonzero(fused_mask)
+                total = fused_mask.size
+                coverage_pct = (nonzero / total) * 100.0 if total > 0 else 0.0
+                logger.info(f"Mask coverage (frame {frame_idx}): {coverage_pct:.2f}% ({nonzero} / {total} px)")
             
             # Process frame
             if transparent:
@@ -304,6 +359,12 @@ def process_video(input_path, output_path, florence_model, florence_processor, m
             
             # Convert back to OpenCV format and write to output video
             frame_result = cv2.cvtColor(np.array(result_image), cv2.COLOR_RGB2BGR)
+            
+            # Debug overlay: burn mask contours onto output frame
+            if debug_overlay and np.count_nonzero(fused_mask) > 0:
+                contours, _ = cv2.findContours(fused_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                cv2.drawContours(frame_result, contours, -1, (0, 255, 0), 2)
+            
             out.write(frame_result)
             
             # Update progress
@@ -359,18 +420,18 @@ def process_video(input_path, output_path, florence_model, florence_processor, m
     logger.info(f"input_path:{input_path}, output_path:{output_file}, overall_progress:100")
     return output_file
 
-def handle_one(image_path: Path, output_path: Path, florence_model, florence_processor, model_manager, device, transparent, max_bbox_percent, force_format, overwrite, frame_step=1, target_fps=0.0, temporal_mask=3, mask_dilate=4, no_white_filter: bool = False, detect_text: str = None, debug_viz_dir: Path = None, white_s_thresh: int = 80, white_v_thresh: int = 180, debug_viz_every: int = 30, bbox_override: str = None):
+def handle_one(image_path: Path, output_path: Path, florence_model, florence_processor, model_manager, device, transparent, max_bbox_percent, force_format, overwrite, frame_step=1, target_fps=0.0, temporal_mask=3, mask_dilate=4, no_white_filter: bool = False, detect_text: str = None, debug_viz_dir: Path = None, white_s_thresh: int = 80, white_v_thresh: int = 180, debug_viz_every: int = 30, bbox_override: str = None, bbox_override_percent: str = None, bbox_preset: str = None, debug_overlay: bool = False):
     if output_path.exists() and not overwrite:
         logger.info(f"Skipping existing file: {output_path}")
         return
 
     # Check if it's a video file
     if is_video_file(image_path):
-        return process_video(image_path, output_path, florence_model, florence_processor, model_manager, device, transparent, max_bbox_percent, force_format, frame_step, target_fps, temporal_mask, mask_dilate, no_white_filter, detect_text, debug_viz_dir, white_s_thresh, white_v_thresh, debug_viz_every, bbox_override)
+        return process_video(image_path, output_path, florence_model, florence_processor, model_manager, device, transparent, max_bbox_percent, force_format, frame_step, target_fps, temporal_mask, mask_dilate, no_white_filter, detect_text, debug_viz_dir, white_s_thresh, white_v_thresh, debug_viz_every, bbox_override, bbox_override_percent, bbox_preset, debug_overlay)
 
     # Process image
     image = Image.open(image_path).convert("RGB")
-    mask_image = get_watermark_mask(image, florence_model, florence_processor, device, max_bbox_percent, detect_text=detect_text, no_white_filter=no_white_filter, debug_viz_dir=debug_viz_dir, debug_frame_idx=0, white_s_thresh=white_s_thresh, white_v_thresh=white_v_thresh, debug_viz_every=debug_viz_every, bbox_override=bbox_override)
+    mask_image = get_watermark_mask(image, florence_model, florence_processor, device, max_bbox_percent, detect_text=detect_text, no_white_filter=no_white_filter, debug_viz_dir=debug_viz_dir, debug_frame_idx=0, white_s_thresh=white_s_thresh, white_v_thresh=white_v_thresh, debug_viz_every=debug_viz_every, bbox_override=bbox_override, bbox_override_percent=bbox_override_percent, bbox_preset=bbox_preset)
 
     if transparent:
         result_image = make_region_transparent(image, mask_image)
@@ -419,7 +480,10 @@ def handle_one(image_path: Path, output_path: Path, florence_model, florence_pro
 @click.option("--debug-viz-dir", type=click.Path(file_okay=False), default=None, help="Directory to save debug visualization images (every ~N frames).")
 @click.option("--debug-viz-every", default=30, type=int, help="Save debug visualization every N frames (default: 30).")
 @click.option("--bbox-override", default=None, type=str, help="Force inpaint bbox 'x1,y1,x2,y2' (overrides detection).")
-def main(input_path: str, output_path: str, overwrite: bool, transparent: bool, max_bbox_percent: float, force_format: str, frame_step: int, target_fps: float, opt_temporal_mask: int, opt_mask_dilate: int, no_white_filter: bool, detect_text: str, debug_viz_dir: str, white_s_thresh: int, white_v_thresh: int, debug_viz_every: int, bbox_override: str):
+@click.option("--bbox-override-percent", default=None, type=str, help="Force inpaint bbox 'x1%,y1%,x2%,y2%' in percent (overrides detection).")
+@click.option("--bbox-preset", type=click.Choice(["tr","tl","br","bl"], case_sensitive=False), default=None, help="Preset bbox (20%W x 15%H) anchored at corner: tr=top-right, tl=top-left, br=bottom-right, bl=bottom-left.")
+@click.option("--debug-overlay", is_flag=True, help="Burn mask contours (green) onto output frames for debugging.")
+def main(input_path: str, output_path: str, overwrite: bool, transparent: bool, max_bbox_percent: float, force_format: str, frame_step: int, target_fps: float, opt_temporal_mask: int, opt_mask_dilate: int, no_white_filter: bool, detect_text: str, debug_viz_dir: str, white_s_thresh: int, white_v_thresh: int, debug_viz_every: int, bbox_override: str, bbox_override_percent: str, bbox_preset: str, debug_overlay: bool):
     # Input validation
     if frame_step < 1:
         logger.error("frame_step must be >= 1")
@@ -471,7 +535,7 @@ def main(input_path: str, output_path: str, overwrite: bool, transparent: bool, 
 
         for idx, file_path in enumerate(tqdm.tqdm(files, desc="Processing files")):
             output_file = output_path / file_path.name
-            handle_one(file_path, output_file, florence_model, florence_processor, model_manager, device, transparent, max_bbox_percent, force_format, overwrite, frame_step, target_fps, opt_temporal_mask, opt_mask_dilate, no_white_filter, detect_text, dbg_dir, white_s_thresh, white_v_thresh, debug_viz_every, bbox_override)
+            handle_one(file_path, output_file, florence_model, florence_processor, model_manager, device, transparent, max_bbox_percent, force_format, overwrite, frame_step, target_fps, opt_temporal_mask, opt_mask_dilate, no_white_filter, detect_text, dbg_dir, white_s_thresh, white_v_thresh, debug_viz_every, bbox_override, bbox_override_percent, bbox_preset, debug_overlay)
             progress = int((idx + 1) / total_files * 100)
             print(f"input_path:{file_path}, output_path:{output_file}, overall_progress:{progress}")
     else:
@@ -483,7 +547,7 @@ def main(input_path: str, output_path: str, overwrite: bool, transparent: bool, 
             else:
                 output_file = output_path.with_suffix(".mp4")  # Default to mp4
         
-        handle_one(input_path, output_file, florence_model, florence_processor, model_manager, device, transparent, max_bbox_percent, force_format, overwrite, frame_step, target_fps, opt_temporal_mask, opt_mask_dilate, no_white_filter, detect_text, dbg_dir, white_s_thresh, white_v_thresh, debug_viz_every, bbox_override)
+        handle_one(input_path, output_file, florence_model, florence_processor, model_manager, device, transparent, max_bbox_percent, force_format, overwrite, frame_step, target_fps, opt_temporal_mask, opt_mask_dilate, no_white_filter, detect_text, dbg_dir, white_s_thresh, white_v_thresh, debug_viz_every, bbox_override, bbox_override_percent, bbox_preset, debug_overlay)
         print(f"input_path:{input_path}, output_path:{output_file}, overall_progress:100")
 
 if __name__ == "__main__":
