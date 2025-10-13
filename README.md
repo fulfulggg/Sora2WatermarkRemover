@@ -20,3 +20,8 @@ https://github.com/user-attachments/assets/8deffd66-b961-4ec2-9dc0-97695b0f91c5
 https://www.youtube.com/watch?v=HkXD4zwk6WY
 
 [![](https://img.youtube.com/vi/HkXD4zwk6WY/0.jpg)](https://www.youtube.com/watch?v=HkXD4zwk6WY)
+
+## Maintainers Rules
+
+- Always provide clickable links in issues/PR comments and docs (no bare text URLs).
+- Colab must always point to `main` and be edited only via PR.
