@@ -5,6 +5,16 @@ import cv2
 import numpy as np
 from PIL import Image, ImageDraw
 from transformers import AutoProcessor, AutoModelForCausalLM
+
+# HF Hub 互換シム（cached_download が無い版への対応）
+try:
+    import huggingface_hub as hfh
+    from huggingface_hub import hf_hub_download
+    if not hasattr(hfh, "cached_download"):
+        hfh.cached_download = hf_hub_download
+except Exception:
+    pass
+
 from iopaint.model_manager import ModelManager
 from iopaint.schema import HDStrategy, LDMSampler, InpaintRequest as Config
 import torch
