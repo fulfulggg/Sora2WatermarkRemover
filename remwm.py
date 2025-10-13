@@ -310,7 +310,11 @@ def main(input_path: str, output_path: str, overwrite: bool, transparent: bool, 
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
-    florence_model = AutoModelForCausalLM.from_pretrained("microsoft/Florence-2-large", trust_remote_code=True).to(device).eval()
+    florence_model = AutoModelForCausalLM.from_pretrained(
+        "microsoft/Florence-2-large",
+        trust_remote_code=True,
+        attn_implementation="eager"
+    ).to(device).eval()
     florence_processor = AutoProcessor.from_pretrained("microsoft/Florence-2-large", trust_remote_code=True)
     logger.info("Florence-2 Model loaded")
 
