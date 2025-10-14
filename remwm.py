@@ -58,25 +58,44 @@ def identify(task_prompt: TaskType, image: MatLike, text_input: str, model: Auto
     )
 
 def get_watermark_mask(image: MatLike, model: AutoModelForCausalLM, processor: AutoProcessor, device: str, max_bbox_percent: float):
-    text_input = "watermark Sora logo"
+    # 固定強設定（選択肢なし）
+    PROMPTS = ["Sora watermark", "watermark", "logo", "Sora"]
+    WHITE_S_MAX = 120   # 緩和: 低彩度しきい値
+    WHITE_V_MIN = 160  # 緩和: 高明度しきい値
     task_prompt = TaskType.OPEN_VOCAB_DETECTION
-    parsed_answer = identify(task_prompt, image, text_input, model, processor, device)
 
     mask = Image.new("L", image.size, 0)
     draw = ImageDraw.Draw(mask)
+    np_img = np.array(image)
 
-    detection_key = "<OPEN_VOCABULARY_DETECTION>"
-    if detection_key in parsed_answer and "bboxes" in parsed_answer[detection_key]:
+    for ptxt in PROMPTS:
+        parsed_answer = identify(task_prompt, image, ptxt, model, processor, device)
+        detection_key = "<OPEN_VOCABULARY_DETECTION>"
+        if detection_key not in parsed_answer or "bboxes" not in parsed_answer[detection_key]:
+            continue
         image_area = image.width * image.height
         for bbox in parsed_answer[detection_key]["bboxes"]:
             x1, y1, x2, y2 = map(int, bbox)
             bbox_area = (x2 - x1) * (y2 - y1)
-            if (bbox_area / image_area) * 100 <= max_bbox_percent:
+            if (bbox_area / image_area) * 100 > max_bbox_percent:
+                logger.warning(f"Skipping large bounding box: {bbox} covering {bbox_area / image_area:.2%} of the image")
+                continue
+            roi = np_img[y1:y2, x1:x2]
+            if roi.size == 0:
+                continue
+            hsv = cv2.cvtColor(roi, cv2.COLOR_RGB2HSV)
+            s_mean = float(np.mean(hsv[:, :, 1]))
+            v_mean = float(np.mean(hsv[:, :, 2]))
+            if s_mean < WHITE_S_MAX and v_mean > WHITE_V_MIN:
                 draw.rectangle([x1, y1, x2, y2], fill=255)
             else:
-                logger.warning(f"Skipping large bounding box: {bbox} covering {bbox_area / image_area:.2%} of the image")
+                logger.info(f"skip colored bbox S={s_mean:.1f} V={v_mean:.1f} {bbox}")
 
-    return mask
+    # マスク膨張（縁の取りこぼし防止）
+    mask_np = np.array(mask)
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (8, 8))
+    mask_np = cv2.dilate(mask_np, kernel, iterations=1)
+    return Image.fromarray(mask_np)
 
 def process_image_with_lama(image: MatLike, mask: MatLike, model_manager: ModelManager):
     config = Config(
@@ -153,6 +172,10 @@ def process_video(input_path, output_path, florence_model, florence_processor, m
     out = cv2.VideoWriter(str(temp_video_path), fourcc, fps_out, (width, height))
     
     # Process each frame
+    # 時間方向の安定化（直近15フレームのOR合成）
+    from collections import deque
+    TEMPORAL_WINDOW = 15
+    recent_masks = deque(maxlen=TEMPORAL_WINDOW)
     with tqdm.tqdm(total=total_frames, desc="Processing video frames") as pbar:
         frame_count = 0
         frame_idx = 0
@@ -173,8 +196,13 @@ def process_video(input_path, output_path, florence_model, florence_processor, m
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             pil_image = Image.fromarray(frame_rgb)
             
-            # Get watermark mask
+            # Get watermark mask + 時間合成
             mask_image = get_watermark_mask(pil_image, florence_model, florence_processor, device, max_bbox_percent)
+            recent_masks.append(np.array(mask_image))
+            stacked = recent_masks[0].copy()
+            for m in list(recent_masks)[1:]:
+                stacked = np.maximum(stacked, m)
+            mask_image = Image.fromarray(stacked.astype(np.uint8))
             
             # Process frame
             if transparent:
@@ -334,7 +362,7 @@ def process_video_with_delogo(input_path, output_path, delogo_regions, force_for
 @click.argument("output_path", type=click.Path())
 @click.option("--overwrite", is_flag=True, help="Overwrite existing files in bulk mode.")
 @click.option("--transparent", is_flag=True, help="Make watermark regions transparent instead of removing.")
-@click.option("--max-bbox-percent", default=10.0, help="Maximum percentage of the image that a bounding box can cover.")
+@click.option("--max-bbox-percent", default=24.0, help="Maximum percentage of the image that a bounding box can cover.")
 @click.option("--force-format", type=click.Choice(["PNG", "WEBP", "JPG", "MP4", "AVI"], case_sensitive=False), default=None, help="Force output format. Defaults to input format.")
 @click.option("--frame-step", default=1, type=int, help="Process every Nth frame (1=all frames, 2=every other frame)")
 @click.option("--target-fps", default=0.0, type=float, help="Target output FPS (0=same as input)")
@@ -362,8 +390,13 @@ def main(input_path: str, output_path: str, overwrite: bool, transparent: bool, 
     logger.info("Florence-2 Model loaded")
 
     if not transparent:
-        model_manager = ModelManager(name="lama", device=device)
-        logger.info("LaMa model loaded")
+        try:
+            model_manager = ModelManager(name="lama", device=device)
+            logger.info("LaMa model loaded")
+        except NotImplementedError as e:
+            logger.warning(f"LaMa backend unavailable ({e}). Falling back to OpenCV inpaint (cv2).")
+            model_manager = ModelManager(name="cv2", device=device)
+            logger.info("cv2 inpaint backend loaded")
     else:
         model_manager = None
 
