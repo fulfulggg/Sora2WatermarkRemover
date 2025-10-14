@@ -57,11 +57,9 @@ def identify(task_prompt: TaskType, image: MatLike, text_input: str, model: Auto
         generated_text, task=task_prompt.value, image_size=(image.width, image.height)
     )
 
-def get_watermark_mask(image: MatLike, model: AutoModelForCausalLM, processor: AutoProcessor, device: str, max_bbox_percent: float):
+def get_watermark_mask(image: MatLike, model: AutoModelForCausalLM, processor: AutoProcessor, device: str, max_bbox_percent: float, white_s_max: int, white_v_min: int, dilate_px: int):
     # 固定強設定（選択肢なし）
     PROMPTS = ["Sora watermark", "watermark", "logo", "Sora"]
-    WHITE_S_MAX = 120   # 緩和: 低彩度しきい値
-    WHITE_V_MIN = 160  # 緩和: 高明度しきい値
     task_prompt = TaskType.OPEN_VOCAB_DETECTION
 
     mask = Image.new("L", image.size, 0)
@@ -86,14 +84,15 @@ def get_watermark_mask(image: MatLike, model: AutoModelForCausalLM, processor: A
             hsv = cv2.cvtColor(roi, cv2.COLOR_RGB2HSV)
             s_mean = float(np.mean(hsv[:, :, 1]))
             v_mean = float(np.mean(hsv[:, :, 2]))
-            if s_mean < WHITE_S_MAX and v_mean > WHITE_V_MIN:
+            if s_mean < white_s_max and v_mean > white_v_min:
                 draw.rectangle([x1, y1, x2, y2], fill=255)
             else:
                 logger.info(f"skip colored bbox S={s_mean:.1f} V={v_mean:.1f} {bbox}")
 
     # マスク膨張（縁の取りこぼし防止）
     mask_np = np.array(mask)
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (8, 8))
+    k = max(1, int(dilate_px))
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k, k))
     mask_np = cv2.dilate(mask_np, kernel, iterations=1)
     return Image.fromarray(mask_np)
 
@@ -130,7 +129,7 @@ def is_video_file(file_path):
     video_extensions = ['.mp4', '.avi', '.mov', '.mkv', '.flv', '.wmv', '.webm']
     return Path(file_path).suffix.lower() in video_extensions
 
-def process_video(input_path, output_path, florence_model, florence_processor, model_manager, device, transparent, max_bbox_percent, force_format, frame_step=1, target_fps=0.0):
+def process_video(input_path, output_path, florence_model, florence_processor, model_manager, device, transparent, max_bbox_percent, force_format, frame_step=1, target_fps=0.0, temporal_window: int = 15, white_s_max: int = 120, white_v_min: int = 160, dilate_px: int = 8):
     """Process a video file by extracting frames, removing watermarks, and reconstructing the video"""
     cap = cv2.VideoCapture(str(input_path))
     if not cap.isOpened():
@@ -172,10 +171,9 @@ def process_video(input_path, output_path, florence_model, florence_processor, m
     out = cv2.VideoWriter(str(temp_video_path), fourcc, fps_out, (width, height))
     
     # Process each frame
-    # 時間方向の安定化（直近15フレームのOR合成）
+    # 時間方向の安定化（直近NフレームのOR合成）
     from collections import deque
-    TEMPORAL_WINDOW = 15
-    recent_masks = deque(maxlen=TEMPORAL_WINDOW)
+    recent_masks = deque(maxlen=max(1, int(temporal_window)))
     with tqdm.tqdm(total=total_frames, desc="Processing video frames") as pbar:
         frame_count = 0
         frame_idx = 0
@@ -197,7 +195,7 @@ def process_video(input_path, output_path, florence_model, florence_processor, m
             pil_image = Image.fromarray(frame_rgb)
             
             # Get watermark mask + 時間合成
-            mask_image = get_watermark_mask(pil_image, florence_model, florence_processor, device, max_bbox_percent)
+            mask_image = get_watermark_mask(pil_image, florence_model, florence_processor, device, max_bbox_percent, white_s_max, white_v_min, dilate_px)
             recent_masks.append(np.array(mask_image))
             stacked = recent_masks[0].copy()
             for m in list(recent_masks)[1:]:
@@ -273,18 +271,18 @@ def process_video(input_path, output_path, florence_model, florence_processor, m
     logger.info(f"input_path:{input_path}, output_path:{output_file}, overall_progress:100")
     return output_file
 
-def handle_one(image_path: Path, output_path: Path, florence_model, florence_processor, model_manager, device, transparent, max_bbox_percent, force_format, overwrite, frame_step=1, target_fps=0.0):
+def handle_one(image_path: Path, output_path: Path, florence_model, florence_processor, model_manager, device, transparent, max_bbox_percent, force_format, overwrite, frame_step=1, target_fps=0.0, white_s_max: int = 120, white_v_min: int = 160, dilate_px: int = 8):
     if output_path.exists() and not overwrite:
         logger.info(f"Skipping existing file: {output_path}")
         return
 
     # Check if it's a video file
     if is_video_file(image_path):
-        return process_video(image_path, output_path, florence_model, florence_processor, model_manager, device, transparent, max_bbox_percent, force_format, frame_step, target_fps)
+        return process_video(image_path, output_path, florence_model, florence_processor, model_manager, device, transparent, max_bbox_percent, force_format, frame_step, target_fps, temporal_window=15, white_s_max=white_s_max, white_v_min=white_v_min, dilate_px=dilate_px)
 
     # Process image
     image = Image.open(image_path).convert("RGB")
-    mask_image = get_watermark_mask(image, florence_model, florence_processor, device, max_bbox_percent)
+    mask_image = get_watermark_mask(image, florence_model, florence_processor, device, max_bbox_percent, white_s_max, white_v_min, dilate_px)
 
     if transparent:
         result_image = make_region_transparent(image, mask_image)
@@ -367,7 +365,11 @@ def process_video_with_delogo(input_path, output_path, delogo_regions, force_for
 @click.option("--frame-step", default=1, type=int, help="Process every Nth frame (1=all frames, 2=every other frame)")
 @click.option("--target-fps", default=0.0, type=float, help="Target output FPS (0=same as input)")
 @click.option("--delogo", multiple=True, help="Fixed-position watermark removal: 'x,y,w,h' (can specify multiple times). Skips AI detection.")
-def main(input_path: str, output_path: str, overwrite: bool, transparent: bool, max_bbox_percent: float, force_format: str, frame_step: int, target_fps: float, delogo: tuple):
+@click.option("--dilate-px", default=8, type=int, help="Mask dilation kernel size in pixels (default: 8)")
+@click.option("--temporal-window", default=15, type=int, help="Temporal OR window size for video masks (default: 15)")
+@click.option("--white-s-max", default=120, type=int, help="HSV saturation max threshold to treat as white-ish (default: 120)")
+@click.option("--white-v-min", default=160, type=int, help="HSV value min threshold to treat as bright (default: 160)")
+def main(input_path: str, output_path: str, overwrite: bool, transparent: bool, max_bbox_percent: float, force_format: str, frame_step: int, target_fps: float, delogo: tuple, dilate_px: int, temporal_window: int, white_s_max: int, white_v_min: int):
     # Input validation
     if frame_step < 1:
         logger.error("frame_step must be >= 1")
@@ -412,7 +414,7 @@ def main(input_path: str, output_path: str, overwrite: bool, transparent: bool, 
 
         for idx, file_path in enumerate(tqdm.tqdm(files, desc="Processing files")):
             output_file = output_path / file_path.name
-            handle_one(file_path, output_file, florence_model, florence_processor, model_manager, device, transparent, max_bbox_percent, force_format, overwrite, frame_step, target_fps)
+            handle_one(file_path, output_file, florence_model, florence_processor, model_manager, device, transparent, max_bbox_percent, force_format, overwrite, frame_step, target_fps, white_s_max=white_s_max, white_v_min=white_v_min, dilate_px=dilate_px)
             progress = int((idx + 1) / total_files * 100)
             print(f"input_path:{file_path}, output_path:{output_file}, overall_progress:{progress}")
     else:
@@ -430,7 +432,7 @@ def main(input_path: str, output_path: str, overwrite: bool, transparent: bool, 
             process_video_with_delogo(input_path, output_file, delogo, force_format)
             print(f"input_path:{input_path}, output_path:{output_file}, overall_progress:100")
         else:
-            handle_one(input_path, output_file, florence_model, florence_processor, model_manager, device, transparent, max_bbox_percent, force_format, overwrite, frame_step, target_fps)
+            handle_one(input_path, output_file, florence_model, florence_processor, model_manager, device, transparent, max_bbox_percent, force_format, overwrite, frame_step, target_fps, white_s_max=white_s_max, white_v_min=white_v_min, dilate_px=dilate_px)
             print(f"input_path:{input_path}, output_path:{output_file}, overall_progress:100")
 
 if __name__ == "__main__":
