@@ -287,6 +287,48 @@ def handle_one(image_path: Path, output_path: Path, florence_model, florence_pro
     logger.info(f"input_path:{image_path}, output_path:{new_output_path}")
     return new_output_path
 
+def process_video_with_delogo(input_path, output_path, delogo_regions, force_format):
+    """Process video using FFmpeg delogo filter (for fixed-position watermarks)"""
+    logger.info(f"Using FFmpeg delogo filter for fixed-position watermark removal")
+    
+    # Build delogo filter string
+    delogo_filters = []
+    for region in delogo_regions:
+        x, y, w, h = map(int, region.split(','))
+        delogo_filters.append(f"delogo=x={x}:y={y}:w={w}:h={h}")
+    
+    vf_string = ",".join(delogo_filters)
+    
+    # Determine output format
+    output_path = Path(output_path)
+    if force_format:
+        output_format = force_format.lower()
+    else:
+        output_format = output_path.suffix[1:] or "mp4"
+    
+    output_file = output_path.with_suffix(f".{output_format}")
+    
+    # Build FFmpeg command
+    ffmpeg_cmd = [
+        "ffmpeg", "-y",
+        "-i", str(input_path),
+        "-vf", vf_string,
+        "-c:a", "copy",  # Copy audio without re-encoding
+        str(output_file)
+    ]
+    
+    try:
+        logger.info(f"Running FFmpeg: {' '.join(ffmpeg_cmd)}")
+        subprocess.run(ffmpeg_cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        logger.info(f"Successfully processed: {output_file}")
+        return output_file
+    except subprocess.CalledProcessError as e:
+        logger.error(f"FFmpeg error: {e}")
+        raise
+    except FileNotFoundError:
+        logger.error("FFmpeg not found. Please install FFmpeg.")
+        raise
+
 @click.command()
 @click.argument("input_path", type=click.Path(exists=True))
 @click.argument("output_path", type=click.Path())
@@ -296,7 +338,8 @@ def handle_one(image_path: Path, output_path: Path, florence_model, florence_pro
 @click.option("--force-format", type=click.Choice(["PNG", "WEBP", "JPG", "MP4", "AVI"], case_sensitive=False), default=None, help="Force output format. Defaults to input format.")
 @click.option("--frame-step", default=1, type=int, help="Process every Nth frame (1=all frames, 2=every other frame)")
 @click.option("--target-fps", default=0.0, type=float, help="Target output FPS (0=same as input)")
-def main(input_path: str, output_path: str, overwrite: bool, transparent: bool, max_bbox_percent: float, force_format: str, frame_step: int, target_fps: float):
+@click.option("--delogo", multiple=True, help="Fixed-position watermark removal: 'x,y,w,h' (can specify multiple times). Skips AI detection.")
+def main(input_path: str, output_path: str, overwrite: bool, transparent: bool, max_bbox_percent: float, force_format: str, frame_step: int, target_fps: float, delogo: tuple):
     # Input validation
     if frame_step < 1:
         logger.error("frame_step must be >= 1")
@@ -348,8 +391,14 @@ def main(input_path: str, output_path: str, overwrite: bool, transparent: bool, 
             else:
                 output_file = output_path.with_suffix(".mp4")  # Default to mp4
         
-        handle_one(input_path, output_file, florence_model, florence_processor, model_manager, device, transparent, max_bbox_percent, force_format, overwrite, frame_step, target_fps)
-        print(f"input_path:{input_path}, output_path:{output_file}, overall_progress:100")
+        # Use delogo if specified for video files
+        if delogo and is_video_file(input_path):
+            logger.info(f"Using delogo method with {len(delogo)} region(s)")
+            process_video_with_delogo(input_path, output_file, delogo, force_format)
+            print(f"input_path:{input_path}, output_path:{output_file}, overall_progress:100")
+        else:
+            handle_one(input_path, output_file, florence_model, florence_processor, model_manager, device, transparent, max_bbox_percent, force_format, overwrite, frame_step, target_fps)
+            print(f"input_path:{input_path}, output_path:{output_file}, overall_progress:100")
 
 if __name__ == "__main__":
     main()
