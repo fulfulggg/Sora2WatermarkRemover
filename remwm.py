@@ -65,12 +65,12 @@ def _mask_iou(a: np.ndarray, b: np.ndarray) -> float:
     return float(inter) / float(union) if union > 0 else 0.0
 
 def get_watermark_mask(image: MatLike, model: AutoModelForCausalLM, processor: AutoProcessor, device: str, max_bbox_percent: float, white_s_max: int, white_v_min: int, dilate_px: int):
-    # 固定強設定（選択肢なし）
-    PROMPTS = ["Sora", "Sora logo", "Sora watermark", "text Sora"]
+    # 検出語を拡張（Sora語を維持しつつ一般語も許容）
+    PROMPTS = ["Sora", "Sora logo", "Sora watermark", "text Sora", "watermark", "logo"]
     task_prompt = TaskType.OPEN_VOCAB_DETECTION
 
-    mask = Image.new("L", image.size, 0)
-    draw = ImageDraw.Draw(mask)
+    # ピクセルマスク（後段でモルフォ処理）
+    mask_np = np.zeros((image.height, image.width), dtype=np.uint8)
     np_img = np.array(image)
 
     for ptxt in PROMPTS:
@@ -92,15 +92,18 @@ def get_watermark_mask(image: MatLike, model: AutoModelForCausalLM, processor: A
             hsv = cv2.cvtColor(roi, cv2.COLOR_RGB2HSV)
             s = hsv[:, :, 1]
             v = hsv[:, :, 2]
-            white_pixels = (s < white_s_max) & (v > white_v_min)
-            ratio = float(np.mean(white_pixels))
-            if ratio >= 0.30:
-                draw.rectangle([x1, y1, x2, y2], fill=255)
-            else:
+            # 白画素のみ採用（矩形塗りつぶしはしない）
+            white_pixels = ((s < white_s_max) & (v > white_v_min)).astype(np.uint8) * 255
+            ratio = float(np.mean(white_pixels > 0))
+            if ratio < 0.06:
                 logger.info(f"skip bbox low white ratio={ratio:.2f} (S<{white_s_max},V>{white_v_min}) {bbox}")
+                continue
+            h, w = white_pixels.shape[:2]
+            sub = mask_np[y1:y2, x1:x2]
+            if sub.shape[0] == h and sub.shape[1] == w:
+                np.maximum(sub, white_pixels, out=sub)
 
     # マスク膨張（縁の取りこぼし防止）
-    mask_np = np.array(mask)
     k = max(1, int(dilate_px))
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k, k))
     mask_np = cv2.dilate(mask_np, kernel, iterations=1)
