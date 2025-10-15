@@ -383,6 +383,14 @@ def main(input_path: str, output_path: str, overwrite: bool, transparent: bool, 
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
+    # Ensure 'flash_attn' exists to satisfy import-time checks by HF dynamic modules
+    try:
+        import importlib.util as _importlib_util
+        if _importlib_util.find_spec("flash_attn") is None:
+            import types as _types
+            sys.modules["flash_attn"] = _types.ModuleType("flash_attn")
+    except Exception:
+        pass
     florence_model = AutoModelForCausalLM.from_pretrained(
         "microsoft/Florence-2-base",
         trust_remote_code=True,
