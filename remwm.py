@@ -65,8 +65,8 @@ def _mask_iou(a: np.ndarray, b: np.ndarray) -> float:
     return float(inter) / float(union) if union > 0 else 0.0
 
 def get_watermark_mask(image: MatLike, model: AutoModelForCausalLM, processor: AutoProcessor, device: str, max_bbox_percent: float, white_s_max: int, white_v_min: int, dilate_px: int):
-    # 検出語を拡張（Sora語を維持しつつ一般語も許容）
-    PROMPTS = ["Sora", "Sora logo", "Sora watermark", "text Sora", "watermark", "logo"]
+    # Sora専用に戻して誤検出を低減
+    PROMPTS = ["Sora", "Sora logo", "Sora watermark", "text Sora"]
     task_prompt = TaskType.OPEN_VOCAB_DETECTION
 
     # ピクセルマスク（後段でモルフォ処理）
@@ -95,7 +95,7 @@ def get_watermark_mask(image: MatLike, model: AutoModelForCausalLM, processor: A
             # 白画素のみ採用（矩形塗りつぶしはしない）
             white_pixels = ((s < white_s_max) & (v > white_v_min)).astype(np.uint8) * 255
             ratio = float(np.mean(white_pixels > 0))
-            if ratio < 0.06:
+            if ratio < 0.12:
                 logger.info(f"skip bbox low white ratio={ratio:.2f} (S<{white_s_max},V>{white_v_min}) {bbox}")
                 continue
             h, w = white_pixels.shape[:2]
@@ -104,6 +104,9 @@ def get_watermark_mask(image: MatLike, model: AutoModelForCausalLM, processor: A
                 np.maximum(sub, white_pixels, out=sub)
 
     # マスク膨張（縁の取りこぼし防止）
+    # 先に小ノイズ除去のオープニング（3x3 erode→dilate）
+    open_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    mask_np = cv2.morphologyEx(mask_np, cv2.MORPH_OPEN, open_kernel, iterations=1)
     k = max(1, int(dilate_px))
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k, k))
     mask_np = cv2.dilate(mask_np, kernel, iterations=1)
