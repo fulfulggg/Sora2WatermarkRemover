@@ -388,7 +388,25 @@ def main(input_path: str, output_path: str, overwrite: bool, transparent: bool, 
         import importlib.util as _importlib_util
         if _importlib_util.find_spec("flash_attn") is None:
             import types as _types
-            sys.modules["flash_attn"] = _types.ModuleType("flash_attn")
+            import importlib.machinery as _machinery
+            _mod = _types.ModuleType("flash_attn")
+            _mod.__spec__ = _machinery.ModuleSpec("flash_attn", loader=None)
+            sys.modules["flash_attn"] = _mod
+    except Exception:
+        pass
+
+    # Force transformers to treat flash_attn as unavailable to select SDPA path
+    try:
+        from transformers.utils import import_utils as _hf_import_utils
+        _old_is_pkg = getattr(_hf_import_utils, "_is_package_available", None)
+        def _no_flash(name, *args, **kwargs):
+            if name == "flash_attn":
+                return False
+            if _old_is_pkg is not None:
+                return _old_is_pkg(name, *args, **kwargs)
+            return False
+        _hf_import_utils._is_package_available = _no_flash
+        _hf_import_utils.is_flash_attn_2_available = lambda: False
     except Exception:
         pass
     florence_model = AutoModelForCausalLM.from_pretrained(
