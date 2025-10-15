@@ -57,6 +57,19 @@ def identify(task_prompt: TaskType, image: MatLike, text_input: str, model: Auto
         generated_text, task=task_prompt.value, image_size=(image.width, image.height)
     )
 
+def is_in_watermark_region(bbox, image_width, image_height):
+    """右側バンド領域のチェック（Sora/ロゴ想定）"""
+    x1, y1, x2, y2 = bbox
+    
+    # バウンディングボックスの中心Y座標
+    y_center = (y1 + y2) / 2
+    
+    # 右側バンド: X > 0.6W かつ 0.25H < Y_center < 0.95H
+    is_right_band = (x1 > image_width * 0.6) and \
+                    (0.25 * image_height < y_center < 0.95 * image_height)
+    
+    return is_right_band
+
 def get_watermark_mask(image: MatLike, model: AutoModelForCausalLM, processor: AutoProcessor, device: str, max_bbox_percent: float, white_s_max: int, white_v_min: int, dilate_px: int):
     # 固定強設定（選択肢なし）
     PROMPTS = ["Sora watermark", "watermark", "logo", "Sora"]
@@ -74,6 +87,12 @@ def get_watermark_mask(image: MatLike, model: AutoModelForCausalLM, processor: A
         image_area = image.width * image.height
         for bbox in parsed_answer[detection_key]["bboxes"]:
             x1, y1, x2, y2 = map(int, bbox)
+            
+            # 位置フィルタ: 右側バンド領域のみ対象
+            if not is_in_watermark_region((x1, y1, x2, y2), image.width, image.height):
+                logger.info(f"skip bbox outside watermark region: {bbox}")
+                continue
+            
             bbox_area = (x2 - x1) * (y2 - y1)
             if (bbox_area / image_area) * 100 > max_bbox_percent:
                 logger.warning(f"Skipping large bounding box: {bbox} covering {bbox_area / image_area:.2%} of the image")
@@ -194,13 +213,18 @@ def process_video(input_path, output_path, florence_model, florence_processor, m
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             pil_image = Image.fromarray(frame_rgb)
             
-            # Get watermark mask + 時間合成
+            # Get watermark mask + 時間合成（投票ベース安定化）
             mask_image = get_watermark_mask(pil_image, florence_model, florence_processor, device, max_bbox_percent, white_s_max, white_v_min, dilate_px)
             recent_masks.append(np.array(mask_image))
-            stacked = recent_masks[0].copy()
-            for m in list(recent_masks)[1:]:
-                stacked = np.maximum(stacked, m)
-            mask_image = Image.fromarray(stacked.astype(np.uint8))
+            
+            # 投票ベース: 過半数のフレームで検出された領域のみ採用（threshold=0.6）
+            if len(recent_masks) > 0:
+                stacked = np.stack(list(recent_masks), axis=0)
+                vote_count = np.sum(stacked > 0, axis=0)
+                stable = (vote_count > len(recent_masks) * 0.6).astype(np.uint8) * 255
+                mask_image = Image.fromarray(stable)
+            else:
+                mask_image = Image.fromarray(np.zeros_like(np.array(mask_image), dtype=np.uint8))
             
             # Process frame
             if transparent:
