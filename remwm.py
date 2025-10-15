@@ -66,7 +66,7 @@ def _mask_iou(a: np.ndarray, b: np.ndarray) -> float:
 
 def get_watermark_mask(image: MatLike, model: AutoModelForCausalLM, processor: AutoProcessor, device: str, max_bbox_percent: float, white_s_max: int, white_v_min: int, dilate_px: int):
     # 固定強設定（選択肢なし）
-    PROMPTS = ["Sora watermark", "watermark", "logo", "Sora"]
+    PROMPTS = ["Sora", "Sora logo", "Sora watermark", "text Sora"]
     task_prompt = TaskType.OPEN_VOCAB_DETECTION
 
     mask = Image.new("L", image.size, 0)
@@ -94,7 +94,7 @@ def get_watermark_mask(image: MatLike, model: AutoModelForCausalLM, processor: A
             v = hsv[:, :, 2]
             white_pixels = (s < white_s_max) & (v > white_v_min)
             ratio = float(np.mean(white_pixels))
-            if ratio >= 0.20:
+            if ratio >= 0.30:
                 draw.rectangle([x1, y1, x2, y2], fill=255)
             else:
                 logger.info(f"skip bbox low white ratio={ratio:.2f} (S<{white_s_max},V>{white_v_min}) {bbox}")
