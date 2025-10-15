@@ -384,11 +384,11 @@ def main(input_path: str, output_path: str, overwrite: bool, transparent: bool, 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
     florence_model = AutoModelForCausalLM.from_pretrained(
-        "microsoft/Florence-2-large",
+        "microsoft/Florence-2-base",
         trust_remote_code=True,
-        attn_implementation="eager"
+        attn_implementation="sdpa"
     ).to(device).eval()
-    florence_processor = AutoProcessor.from_pretrained("microsoft/Florence-2-large", trust_remote_code=True)
+    florence_processor = AutoProcessor.from_pretrained("microsoft/Florence-2-base", trust_remote_code=True)
     logger.info("Florence-2 Model loaded")
 
     if not transparent:
