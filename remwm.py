@@ -100,6 +100,33 @@ def get_watermark_mask(image: MatLike, model: AutoModelForCausalLM, processor: A
             else:
                 logger.info(f"skip colored bbox S={s_mean:.1f} V={v_mean:.1f} {bbox}")
 
+    # フォールバック: 1周目でマスクが空なら、検出語を一時拡張し閾値を緩和して再試行
+    first_mask_np = np.array(mask)
+    if not np.any(first_mask_np > 0):
+        FB_PROMPTS = ["Sora", "Sora logo", "Sora watermark", "text Sora", "watermark", "logo"]
+        for ptxt in FB_PROMPTS:
+            parsed_answer = identify(task_prompt, image, ptxt, model, processor, device)
+            detection_key = "<OPEN_VOCABULARY_DETECTION>"
+            if detection_key not in parsed_answer or "bboxes" not in parsed_answer[detection_key]:
+                continue
+            image_area = image.width * image.height
+            for bbox in parsed_answer[detection_key]["bboxes"]:
+                x1, y1, x2, y2 = map(int, bbox)
+                if not is_in_watermark_region((x1, y1, x2, y2), image.width, image.height):
+                    continue
+                bbox_area = (x2 - x1) * (y2 - y1)
+                if (bbox_area / image_area) * 100 > max_bbox_percent:
+                    continue
+                roi = np_img[y1:y2, x1:x2]
+                if roi.size == 0:
+                    continue
+                hsv = cv2.cvtColor(roi, cv2.COLOR_RGB2HSV)
+                s_mean = float(np.mean(hsv[:, :, 1]))
+                v_mean = float(np.mean(hsv[:, :, 2]))
+                # 緩和幅: Sは+8まで、Vは-15まで許容（このフレーム限定）
+                if s_mean <= (white_s_max + 8.0) and v_mean > (white_v_min - 15.0):
+                    draw.rectangle([x1, y1, x2, y2], fill=255)
+
     # マスク膨張（縁の取りこぼし防止）
     mask_np = np.array(mask)
     k = max(1, int(dilate_px))
