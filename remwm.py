@@ -58,21 +58,12 @@ def identify(task_prompt: TaskType, image: MatLike, text_input: str, model: Auto
     )
 
 def is_in_watermark_region(bbox, image_width, image_height):
-    """右側バンド領域のチェック（Sora/ロゴ想定）"""
-    x1, y1, x2, y2 = bbox
-    
-    # バウンディングボックスの中心Y座標
-    y_center = (y1 + y2) / 2
-    
-    # 右側バンド: X > 0.6W かつ 0.25H < Y_center < 0.95H
-    is_right_band = (x1 > image_width * 0.6) and \
-                    (0.25 * image_height < y_center < 0.95 * image_height)
-    
-    return is_right_band
+    # ROIフィルタを無効化（常に許可）
+    return True
 
 def get_watermark_mask(image: MatLike, model: AutoModelForCausalLM, processor: AutoProcessor, device: str, max_bbox_percent: float, white_s_max: int, white_v_min: int, dilate_px: int):
-    # 固定強設定（選択肢なし）
-    PROMPTS = ["Sora watermark", "watermark", "logo", "Sora"]
+    # Sora専用に限定（誤検出抑制）
+    PROMPTS = ["Sora", "Sora logo", "Sora watermark", "text Sora"]
     task_prompt = TaskType.OPEN_VOCAB_DETECTION
 
     mask = Image.new("L", image.size, 0)
