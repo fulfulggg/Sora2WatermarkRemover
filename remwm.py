@@ -128,7 +128,8 @@ def get_watermark_mask(image: MatLike, model: AutoModelForCausalLM, processor: A
                 hsv = cv2.cvtColor(roi, cv2.COLOR_RGB2HSV)
                 s = hsv[:, :, 1]
                 v = hsv[:, :, 2]
-                white_px = ((s < white_s_max) & (v > white_v_min)).astype(np.uint8) * 255
+                # Fallback 時のみしきい値を緩和（S を +8、V を -15）
+                white_px = ((s <= (white_s_max + 8.0)) & (v > (white_v_min - 15.0))).astype(np.uint8) * 255
 
                 # YCrCbで肌色を推定し、白ピクセルから除去
                 ycrcb = cv2.cvtColor(roi, cv2.COLOR_RGB2YCrCb)
@@ -258,8 +259,8 @@ def process_video(input_path, output_path, florence_model, florence_processor, m
 
             # フレーム限定の投票緩和: 直近マスクの被覆率が小さい( <0.2% )ならthr=0.5, win=min(7,len)
             coverage_ratio = float(np.mean(current_mask_np > 0))
-            vote_thr = 0.5 if coverage_ratio < 0.002 else 0.6
-            win = min(len(recent_masks), 7) if coverage_ratio < 0.002 else len(recent_masks)
+            vote_thr = 0.5 if coverage_ratio < 0.005 else 0.6
+            win = min(len(recent_masks), 7) if coverage_ratio < 0.005 else len(recent_masks)
 
             if len(recent_masks) > 0:
                 stacked = np.stack(list(recent_masks)[-win:], axis=0)
