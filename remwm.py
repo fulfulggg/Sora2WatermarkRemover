@@ -57,20 +57,26 @@ def identify(task_prompt: TaskType, image: MatLike, text_input: str, model: Auto
         generated_text, task=task_prompt.value, image_size=(image.width, image.height)
     )
 
-def _mask_iou(a: np.ndarray, b: np.ndarray) -> float:
-    a_bin = (a > 0)
-    b_bin = (b > 0)
-    inter = np.logical_and(a_bin, b_bin).sum()
-    union = np.logical_or(a_bin, b_bin).sum()
-    return float(inter) / float(union) if union > 0 else 0.0
+def is_in_watermark_region(bbox, image_width, image_height):
+    """右側バンド領域のチェック（Sora/ロゴ想定）"""
+    x1, y1, x2, y2 = bbox
+    
+    # バウンディングボックスの中心Y座標
+    y_center = (y1 + y2) / 2
+    
+    # 右側バンド: X > 0.6W かつ 0.25H < Y_center < 0.95H
+    is_right_band = (x1 > image_width * 0.6) and \
+                    (0.25 * image_height < y_center < 0.95 * image_height)
+    
+    return is_right_band
 
 def get_watermark_mask(image: MatLike, model: AutoModelForCausalLM, processor: AutoProcessor, device: str, max_bbox_percent: float, white_s_max: int, white_v_min: int, dilate_px: int):
-    # Sora専用に戻して誤検出を低減
-    PROMPTS = ["Sora", "Sora logo", "Sora watermark", "text Sora"]
+    # 固定強設定（選択肢なし）
+    PROMPTS = ["Sora watermark", "watermark", "logo", "Sora"]
     task_prompt = TaskType.OPEN_VOCAB_DETECTION
 
-    # ピクセルマスク（後段でモルフォ処理）
-    mask_np = np.zeros((image.height, image.width), dtype=np.uint8)
+    mask = Image.new("L", image.size, 0)
+    draw = ImageDraw.Draw(mask)
     np_img = np.array(image)
 
     for ptxt in PROMPTS:
@@ -82,6 +88,11 @@ def get_watermark_mask(image: MatLike, model: AutoModelForCausalLM, processor: A
         for bbox in parsed_answer[detection_key]["bboxes"]:
             x1, y1, x2, y2 = map(int, bbox)
             
+            # 位置フィルタ: 右側バンド領域のみ対象
+            if not is_in_watermark_region((x1, y1, x2, y2), image.width, image.height):
+                logger.info(f"skip bbox outside watermark region: {bbox}")
+                continue
+            
             bbox_area = (x2 - x1) * (y2 - y1)
             if (bbox_area / image_area) * 100 > max_bbox_percent:
                 logger.warning(f"Skipping large bounding box: {bbox} covering {bbox_area / image_area:.2%} of the image")
@@ -90,23 +101,15 @@ def get_watermark_mask(image: MatLike, model: AutoModelForCausalLM, processor: A
             if roi.size == 0:
                 continue
             hsv = cv2.cvtColor(roi, cv2.COLOR_RGB2HSV)
-            s = hsv[:, :, 1]
-            v = hsv[:, :, 2]
-            # 白画素のみ採用（矩形塗りつぶしはしない）
-            white_pixels = ((s < white_s_max) & (v > white_v_min)).astype(np.uint8) * 255
-            ratio = float(np.mean(white_pixels > 0))
-            if ratio < 0.12:
-                logger.info(f"skip bbox low white ratio={ratio:.2f} (S<{white_s_max},V>{white_v_min}) {bbox}")
-                continue
-            h, w = white_pixels.shape[:2]
-            sub = mask_np[y1:y2, x1:x2]
-            if sub.shape[0] == h and sub.shape[1] == w:
-                np.maximum(sub, white_pixels, out=sub)
+            s_mean = float(np.mean(hsv[:, :, 1]))
+            v_mean = float(np.mean(hsv[:, :, 2]))
+            if s_mean < white_s_max and v_mean > white_v_min:
+                draw.rectangle([x1, y1, x2, y2], fill=255)
+            else:
+                logger.info(f"skip colored bbox S={s_mean:.1f} V={v_mean:.1f} {bbox}")
 
     # マスク膨張（縁の取りこぼし防止）
-    # 先に小ノイズ除去のオープニング（3x3 erode→dilate）
-    open_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-    mask_np = cv2.morphologyEx(mask_np, cv2.MORPH_OPEN, open_kernel, iterations=1)
+    mask_np = np.array(mask)
     k = max(1, int(dilate_px))
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k, k))
     mask_np = cv2.dilate(mask_np, kernel, iterations=1)
@@ -214,17 +217,11 @@ def process_video(input_path, output_path, florence_model, florence_processor, m
             mask_image = get_watermark_mask(pil_image, florence_model, florence_processor, device, max_bbox_percent, white_s_max, white_v_min, dilate_px)
             recent_masks.append(np.array(mask_image))
             
-            # 投票ベース: 動いているときは短窓/低閾値、静止時は長窓/高閾値
+            # 投票ベース: 過半数のフレームで検出された領域のみ採用（threshold=0.6）
             if len(recent_masks) > 0:
-                moving = False
-                if len(recent_masks) >= 2:
-                    iou = _mask_iou(recent_masks[-1], recent_masks[-2])
-                    moving = iou < 0.30
-                vote_thr = 0.5 if moving else 0.6
-                win = min(len(recent_masks), 5 if moving else len(recent_masks))
-                stacked = np.stack(list(recent_masks)[-win:], axis=0)
+                stacked = np.stack(list(recent_masks), axis=0)
                 vote_count = np.sum(stacked > 0, axis=0)
-                stable = (vote_count > win * vote_thr).astype(np.uint8) * 255
+                stable = (vote_count > len(recent_masks) * 0.6).astype(np.uint8) * 255
                 mask_image = Image.fromarray(stable)
             else:
                 mask_image = Image.fromarray(np.zeros_like(np.array(mask_image), dtype=np.uint8))
