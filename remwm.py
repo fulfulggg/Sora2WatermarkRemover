@@ -105,6 +105,9 @@ def get_watermark_mask(image: MatLike, model: AutoModelForCausalLM, processor: A
     coverage_ratio = float(np.mean(first_mask_np > 0))
     if coverage_ratio < 0.002:
         FB_PROMPTS = ["Sora", "Sora logo", "Sora watermark", "text Sora", "watermark", "logo"]
+        # 既存の一次マスクに重ねてピクセル単位で追記する
+        mask_work = first_mask_np.copy()
+        kernel3 = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
         for ptxt in FB_PROMPTS:
             parsed_answer = identify(task_prompt, image, ptxt, model, processor, device)
             detection_key = "<OPEN_VOCABULARY_DETECTION>"
@@ -122,11 +125,17 @@ def get_watermark_mask(image: MatLike, model: AutoModelForCausalLM, processor: A
                 if roi.size == 0:
                     continue
                 hsv = cv2.cvtColor(roi, cv2.COLOR_RGB2HSV)
-                s_mean = float(np.mean(hsv[:, :, 1]))
-                v_mean = float(np.mean(hsv[:, :, 2]))
-                # 緩和幅: Sは+8まで、Vは-15まで許容（このフレーム限定）
-                if s_mean <= (white_s_max + 8.0) and v_mean > (white_v_min - 15.0):
-                    draw.rectangle([x1, y1, x2, y2], fill=255)
+                s = hsv[:, :, 1]
+                v = hsv[:, :, 2]
+                # フォールバックは矩形ではなく白ピクセルのみ採用
+                white_px = ((s < white_s_max) & (v > white_v_min)).astype(np.uint8) * 255
+                white_px = cv2.morphologyEx(white_px, cv2.MORPH_CLOSE, kernel3, iterations=1)
+                # 既存マスクと合成（領域内のみ上書き）
+                sub = mask_work[y1:y2, x1:x2]
+                h_sub, w_sub = sub.shape[:1][0], sub.shape[:1][0] if len(sub.shape)==1 else sub.shape[1]
+                mask_work[y1:y2, x1:x2] = np.maximum(sub, white_px[:h_sub, :w_sub])
+        # PIL に戻す
+        mask = Image.fromarray(mask_work)
 
     # マスク膨張（縁の取りこぼし防止）
     mask_np = np.array(mask)
