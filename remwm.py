@@ -32,6 +32,28 @@ try:
 except ImportError:
     MatLike = np.ndarray
 
+# --- Colab/GitHub safety guard ----------------------------------------------
+def _ensure_executed_from_repo_dir() -> None:
+    """Fail fast when this script is executed from a stray location like
+    /content/remwm.py. We only allow execution inside a cloned repository dir
+    (parent folder name must be 'Sora2WatermarkRemover').
+
+    This prevents old local copies from being used unintentionally in Colab.
+    """
+    try:
+        here = Path(__file__).resolve()
+        # Only enforce on Colab-like paths to avoid blocking local dev usage
+        if str(here).startswith("/content/") and here.parent.name != "Sora2WatermarkRemover":
+            print(
+                f"ERROR: remwm.py is running from an unexpected location: {here}\n"
+                "Please run the GitHub version cloned at /content/Sora2WatermarkRemover/remwm.py\n"
+                "(The notebook now clones it automatically; re-run the setup cell.)"
+            )
+            sys.exit(2)
+    except Exception:
+        # Non-fatal: if anything goes wrong, don't block execution
+        pass
+
 class TaskType(str, Enum):
     OPEN_VOCAB_DETECTION = "<OPEN_VOCABULARY_DETECTION>"
     """Detect bounding box for objects and OCR text"""
@@ -533,4 +555,5 @@ def main(input_path: str, output_path: str, overwrite: bool, transparent: bool, 
             print(f"input_path:{input_path}, output_path:{output_file}, overall_progress:100")
 
 if __name__ == "__main__":
+    _ensure_executed_from_repo_dir()
     main()
