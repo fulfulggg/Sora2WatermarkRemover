@@ -94,7 +94,8 @@ def get_watermark_mask(image: MatLike, model: AutoModelForCausalLM, processor: A
             hsv = cv2.cvtColor(roi, cv2.COLOR_RGB2HSV)
             s_mean = float(np.mean(hsv[:, :, 1]))
             v_mean = float(np.mean(hsv[:, :, 2]))
-            if s_mean < white_s_max and v_mean > white_v_min:
+            # 緩和: Sの判定を厳密不等号から以下(<=)へ
+            if s_mean <= white_s_max and v_mean > white_v_min:
                 draw.rectangle([x1, y1, x2, y2], fill=255)
             else:
                 logger.info(f"skip colored bbox S={s_mean:.1f} V={v_mean:.1f} {bbox}")
