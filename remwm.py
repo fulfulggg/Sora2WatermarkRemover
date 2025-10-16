@@ -100,10 +100,10 @@ def get_watermark_mask(image: MatLike, model: AutoModelForCausalLM, processor: A
             else:
                 logger.info(f"skip colored bbox S={s_mean:.1f} V={v_mean:.1f} {bbox}")
 
-    # フォールバック: 1周目の被覆率が小さい( <0.2% )なら、検出語を一時拡張し閾値を緩和して再試行
+    # フォールバック: 1周目の被覆率が小さい( <0.5% )なら、検出語を一時拡張し閾値を緩和して再試行
     first_mask_np = np.array(mask)
     coverage_ratio = float(np.mean(first_mask_np > 0))
-    if coverage_ratio < 0.002:
+    if coverage_ratio < 0.005:
         FB_PROMPTS = ["Sora", "Sora logo", "Sora watermark", "text Sora", "watermark", "logo"]
         # 既存の一次マスクに重ねてピクセル単位で追記する
         mask_work = first_mask_np.copy()
@@ -124,16 +124,25 @@ def get_watermark_mask(image: MatLike, model: AutoModelForCausalLM, processor: A
                 roi = np_img[y1:y2, x1:x2]
                 if roi.size == 0:
                     continue
+                # HSVで白を抽出
                 hsv = cv2.cvtColor(roi, cv2.COLOR_RGB2HSV)
                 s = hsv[:, :, 1]
                 v = hsv[:, :, 2]
-                # フォールバックは矩形ではなく白ピクセルのみ採用
                 white_px = ((s < white_s_max) & (v > white_v_min)).astype(np.uint8) * 255
+
+                # YCrCbで肌色を推定し、白ピクセルから除去
+                ycrcb = cv2.cvtColor(roi, cv2.COLOR_RGB2YCrCb)
+                Yc, Cr, Cb = ycrcb[:, :, 0], ycrcb[:, :, 1], ycrcb[:, :, 2]
+                skin_mask = ((Cr > 135) & (Cr < 180) & (Cb > 85) & (Cb < 135)).astype(np.uint8) * 255
+                white_px = cv2.bitwise_and(white_px, cv2.bitwise_not(skin_mask))
+
+                # 1px erode でにじみを抑え、3x3 close で穴埋め
+                white_px = cv2.erode(white_px, kernel3, iterations=1)
                 white_px = cv2.morphologyEx(white_px, cv2.MORPH_CLOSE, kernel3, iterations=1)
-                # 既存マスクと合成（領域内のみ上書き）
+
+                # 既存マスクと合成
                 sub = mask_work[y1:y2, x1:x2]
-                h_sub, w_sub = sub.shape[:1][0], sub.shape[:1][0] if len(sub.shape)==1 else sub.shape[1]
-                mask_work[y1:y2, x1:x2] = np.maximum(sub, white_px[:h_sub, :w_sub])
+                mask_work[y1:y2, x1:x2] = np.maximum(sub, white_px)
         # PIL に戻す
         mask = Image.fromarray(mask_work)
 
