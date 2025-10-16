@@ -100,9 +100,10 @@ def get_watermark_mask(image: MatLike, model: AutoModelForCausalLM, processor: A
             else:
                 logger.info(f"skip colored bbox S={s_mean:.1f} V={v_mean:.1f} {bbox}")
 
-    # フォールバック: 1周目でマスクが空なら、検出語を一時拡張し閾値を緩和して再試行
+    # フォールバック: 1周目の被覆率が小さい( <0.2% )なら、検出語を一時拡張し閾値を緩和して再試行
     first_mask_np = np.array(mask)
-    if not np.any(first_mask_np > 0):
+    coverage_ratio = float(np.mean(first_mask_np > 0))
+    if coverage_ratio < 0.002:
         FB_PROMPTS = ["Sora", "Sora logo", "Sora watermark", "text Sora", "watermark", "logo"]
         for ptxt in FB_PROMPTS:
             parsed_answer = identify(task_prompt, image, ptxt, model, processor, device)
@@ -234,16 +235,21 @@ def process_video(input_path, output_path, florence_model, florence_processor, m
             
             # Get watermark mask + 時間合成（投票ベース安定化）
             mask_image = get_watermark_mask(pil_image, florence_model, florence_processor, device, max_bbox_percent, white_s_max, white_v_min, dilate_px)
-            recent_masks.append(np.array(mask_image))
-            
-            # 投票ベース: 過半数のフレームで検出された領域のみ採用（threshold=0.6）
+            current_mask_np = np.array(mask_image)
+            recent_masks.append(current_mask_np)
+
+            # フレーム限定の投票緩和: 直近マスクの被覆率が小さい( <0.2% )ならthr=0.5, win=min(7,len)
+            coverage_ratio = float(np.mean(current_mask_np > 0))
+            vote_thr = 0.5 if coverage_ratio < 0.002 else 0.6
+            win = min(len(recent_masks), 7) if coverage_ratio < 0.002 else len(recent_masks)
+
             if len(recent_masks) > 0:
-                stacked = np.stack(list(recent_masks), axis=0)
+                stacked = np.stack(list(recent_masks)[-win:], axis=0)
                 vote_count = np.sum(stacked > 0, axis=0)
-                stable = (vote_count > len(recent_masks) * 0.6).astype(np.uint8) * 255
+                stable = (vote_count > win * vote_thr).astype(np.uint8) * 255
                 mask_image = Image.fromarray(stable)
             else:
-                mask_image = Image.fromarray(np.zeros_like(np.array(mask_image), dtype=np.uint8))
+                mask_image = Image.fromarray(np.zeros_like(current_mask_np, dtype=np.uint8))
             
             # Process frame
             if transparent:
