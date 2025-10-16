@@ -103,7 +103,9 @@ def get_watermark_mask(image: MatLike, model: AutoModelForCausalLM, processor: A
     # フォールバック: 1周目の被覆率が小さい( <0.5% )なら、検出語を一時拡張し閾値を緩和して再試行
     first_mask_np = np.array(mask)
     coverage_ratio = float(np.mean(first_mask_np > 0))
+    fallback_triggered = False
     if coverage_ratio < 0.005:
+        fallback_triggered = True
         FB_PROMPTS = ["Sora", "Sora logo", "Sora watermark", "text Sora", "watermark", "logo"]
         # 既存の一次マスクに重ねてピクセル単位で追記する
         mask_work = first_mask_np.copy()
@@ -149,7 +151,8 @@ def get_watermark_mask(image: MatLike, model: AutoModelForCausalLM, processor: A
 
     # マスク膨張（縁の取りこぼし防止）
     mask_np = np.array(mask)
-    k = max(1, int(dilate_px))
+    # フォールバック発火フレームのみ、膨張カーネルを +2px で強める
+    k = max(1, int(dilate_px + (2 if 'fallback_triggered' in locals() and fallback_triggered else 0)))
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k, k))
     mask_np = cv2.dilate(mask_np, kernel, iterations=1)
     return Image.fromarray(mask_np)
